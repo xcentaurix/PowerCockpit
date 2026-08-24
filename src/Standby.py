@@ -10,7 +10,14 @@ from Components.ActionMap import ActionMap
 from Components.config import config, configfile
 from Components.Console import Console
 import Components.ParentalControl
-from Components.SystemInfo import SystemInfo, BOXTYPE, BRAND, DISPLAYBRAND, MACHINENAME
+from Components.SystemInfo import SystemInfo, BoxInfo
+# BOXTYPE and MACHINENAME are no longer exported as module-level names on openATV
+# (only BRAND/DISPLAYBRAND are); BoxInfo.getItem(...) is the one accessor both
+# openATV and OpenViX provide for all four, so derive them from it directly.
+BOXTYPE = BoxInfo.getItem("boxtype")
+BRAND = BoxInfo.getItem("brand")
+DISPLAYBRAND = BoxInfo.getItem("displaybrand")
+MACHINENAME = BoxInfo.getItem("machinename")
 from Components.Sources.StreamService import StreamServiceList
 try:
 	from Plugins.SystemPlugins.JobCockpit.JobSupervisor import JobSupervisor
@@ -26,6 +33,14 @@ import Screens.InfoBar
 import Screens.Standby
 from Screens.Screen import Screen, ScreenSummary
 from Screens.MessageBox import MessageBox
+try:
+    # openATV's MessageBox defines MessageBoxSummary and unconditionally uses it as
+    # its createSummary() result; OpenViX's MessageBox doesn't define this class at
+    # all (its Screen.createSummary() defaults to None - no summary dialog is built,
+    # so it never hits the crash this is worked around below).
+    from Screens.MessageBox import MessageBoxSummary
+except ImportError:
+    MessageBoxSummary = None
 import Tools.Notifications
 from .RecordingUtils import isLiveRecordingOrRecordingSoon
 from .__init__ import _
@@ -68,6 +83,15 @@ def lastPowerState(state):
 	config.usage.power.last_known_state.value = state
 	config.usage.power.last_known_state.save()
 	configfile.save()
+
+
+def isServiceProtected(ref):
+	# OpenViX exposes a synchronous isProtected(ref); OpenATV only has the
+	# callback/PIN-dialog driven isServicePlayable(), so there is no equivalent
+	# side-effect-free check there. Treat "no isProtected" as "not protected"
+	# rather than crashing (see PowerCockpit crash log 2026-08-21 02:55:46).
+	isProtected = getattr(Components.ParentalControl.parentalControl, "isProtected", None)
+	return bool(isProtected and isProtected(ref))
 
 
 class Standby2(Screen):
@@ -121,7 +145,7 @@ class Standby2(Screen):
 		self.paused_service = self.paused_action = False
 
 		self.prev_running_service = self.session.nav.getCurrentlyPlayingServiceOrGroup()
-		if Components.ParentalControl.parentalControl.isProtected(self.prev_running_service):
+		if isServiceProtected(self.prev_running_service):
 			self.prev_running_service = eServiceReference(config.tv.lastservice.value)
 		service = self.prev_running_service and self.prev_running_service.toString()
 		if service:
@@ -191,7 +215,7 @@ class Standby2(Screen):
 
 	def stopService(self):
 		self.prev_running_service = self.session.nav.getCurrentlyPlayingServiceOrGroup()
-		if Components.ParentalControl.parentalControl.isProtected(self.prev_running_service):
+		if isServiceProtected(self.prev_running_service):
 			self.prev_running_service = eServiceReference(config.tv.lastservice.value)
 		self.session.nav.stopService()
 
@@ -373,7 +397,10 @@ class TryQuitMainloop(MessageBox):
 		next_rec_time = -1
 		if not recordings:
 			next_rec_time = session.nav.RecordTimer.getNextRecordingTime()
-		if config.usage.task_warning.value and len(jobs):
+		# config.usage.task_warning only exists on OpenViX (Components/UsageConfig.py);
+		# openATV has no such toggle and always warns about pending jobs, so treat its
+		# absence as "warning enabled" to match openATV's own native Standby.py behavior.
+		if (not hasattr(config.usage, "task_warning") or config.usage.task_warning.value) and len(jobs):
 			reason = (ngettext("%d job is running in the background!", "%d jobs are running in the background!", len(jobs)) % len(jobs)) + '\n'
 		if inTimeshift:
 			reason = _("You seem to be in timeshift!") + '\n'
@@ -386,6 +413,7 @@ class TryQuitMainloop(MessageBox):
 		if reason and inStandby:
 			if retvalue == QUIT_SHUTDOWN:
 				DeferredShutdown(session, retvalue)
+			self.isMessageBox = False
 			self.skin = """<screen position="1310,0" size="0,0"/>"""
 			Screen.__init__(self, session)
 			self.close(False)
@@ -398,6 +426,7 @@ class TryQuitMainloop(MessageBox):
 				self.deferShutdown = True
 				self.onShow.append(self.__onShow)
 				self.onHide.append(self.__onHide)
+				self.isMessageBox = True
 				return
 			text = {
 				QUIT_REBOOT: _("Really reboot now?"),
@@ -416,10 +445,25 @@ class TryQuitMainloop(MessageBox):
 				self.connected = True
 				self.onShow.append(self.__onShow)
 				self.onHide.append(self.__onHide)
+				self.isMessageBox = True
 				return
+		self.isMessageBox = False
 		self.skin = """<screen position="1310,0" size="0,0"/>"""
 		Screen.__init__(self, session)
 		self.close(True)
+
+	def createSummary(self):
+		# TryQuitMainloop can construct itself via either MessageBox.__init__ (a real
+		# dialog, self.text set) or Screen.__init__ only (invisible passthrough, no
+		# self.text) - openATV's session always builds a summary dialog regardless, so
+		# it must pick a summary class matching which constructor actually ran,
+		# mirroring openATV's own Screens/Standby.py:TryQuitMainloop.createSummary().
+		# On OpenViX MessageBoxSummary doesn't exist and Screen.createSummary() already
+		# returns None unconditionally (no summary is ever built there), so fall back
+		# to that unchanged, pre-existing behavior instead of forcing ScreenSummary.
+		if MessageBoxSummary is None:
+			return Screen.createSummary(self)
+		return MessageBoxSummary if self.isMessageBox else ScreenSummary
 
 	def getRecordEvent(self, recservice, event):
 		if event == iRecordableService.evEnd and config.timeshift.isRecording.value:
