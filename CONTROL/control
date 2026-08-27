@@ -1,7 +1,6 @@
 Description: PowerCockpit
 Maintainer: xcentaurix
 Package: enigma2-plugin-systemplugins-powercockpit
-Version: 0.5.3
 Architecture: all
 Conflicts: enigma2-plugin-systemplugins-safepoweroff
 Replaces: enigma2-plugin-systemplugins-safepoweroff
